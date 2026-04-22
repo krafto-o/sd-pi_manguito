@@ -5,8 +5,27 @@ import serial.tools.list_ports
 import tkinter as tk
 from tkinter import messagebox
 import threading
+import json
+import time
+import calibrador  # Importamos tu nuevo archivo modular
+
 
 # --- CONFIGURACION DE COLORES Y AREA DE OPEN VISION ---
+# Función para extraer los arreglos Numpy desde el JSON
+def cargar_limites_hsv():
+    try:
+        with open("config_hsv.json", "r") as f:
+            c = json.load(f)
+            return (
+                np.array([c["h_min"], c["s_min"], c["v_min"]]),
+                np.array([c["h_max"], c["s_max"], c["v_max"]]),
+            )
+    # Valores de seguridad si el archivo no existe
+    except Exception as e:
+        print(f"Error: {e}")
+        return np.array([35, 40, 40]), np.array([85, 255, 255])
+
+
 VERDE_BAJO = np.array([35, 40, 40])  # TODO: Definir valores para el color verde
 VERDE_ALTO = np.array([85, 255, 255])  # TODO: Definir valores para el color amarillo
 AREA_MINIMA = 5000
@@ -121,44 +140,52 @@ def escuchar_arduino():
 # --- OPEN CV EN UN HILO SEPARADO ---
 def bucle_vision():
     global ultimo_comando_vision
-    # número de la cámara virtual de scrcpy
-    cap = cv2.VideoCapture(2)
 
     while programa_corriendo:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, VERDE_BAJO, VERDE_ALTO)
-        mask = cv2.erode(mask, None, iterations=2)
-        mask = cv2.dilate(mask, None, iterations=2)
-
-        contornos, _ = cv2.findContours(
-            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        detectado_verde = False
-        for c in contornos:
-            if cv2.contourArea(c) > AREA_MINIMA:
-                x, y, w, h = cv2.boundingRect(c)
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                detectado_verde = True
-                break
-
-        # Logica de envio condicional basada en el estado
         if estado_sistema == "OPERANDO":
-            if detectado_verde:
-                # Solo enviamos el comando si no fue lo ultimo que se envio
-                if ultimo_comando_vision != "V":
-                    enviar_comando("V")
-                    ultimo_comando_vision = "V"
+            # 1. Cargamos la config fresca justo al arrancar la banda
+            VERDE_BAJO, VERDE_ALTO = cargar_limites_hsv()
 
-        cv2.imshow("Monitor de Camara", frame)
-        cv2.waitKey(1)  # Tiempo para que OpenCV actualice su ventana
+            # 2. Tomamos control de la cámara
+            cap = cv2.VideoCapture(2)
 
-    cap.release()
-    cv2.destroyAllWindows()
+            while estado_sistema == "OPERANDO" and programa_corriendo:
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                mask = cv2.inRange(hsv, VERDE_BAJO, VERDE_ALTO)
+                mask = cv2.erode(mask, None, iterations=2)
+                mask = cv2.dilate(mask, None, iterations=2)
+
+                contornos, _ = cv2.findContours(
+                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+
+                detectado_verde = False
+                for c in contornos:
+                    if cv2.contourArea(c) > 5000:
+                        x, y, w, h = cv2.boundingRect(c)
+                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                        detectado_verde = True
+                        break
+
+                if detectado_verde:
+                    if ultimo_comando_vision != "V":
+                        enviar_comando("V")
+                        ultimo_comando_vision = "V"
+
+                cv2.imshow("Monitor de Produccion", frame)
+                cv2.waitKey(1)
+
+            # 3. Al detener la banda, SOLTAMOS la cámara y cerramos la ventana
+            cap.release()
+            cv2.destroyWindow("Monitor de Produccion")
+
+        else:
+            # Si no estamos operando, el hilo duerme un poco para no quemar CPU
+            time.sleep(0.2)
 
 
 def disparar_emergencia():
@@ -195,6 +222,20 @@ def cerrar_programa():
         ventana.destroy()
 
 
+def abrir_herramienta_calibracion():
+    if estado_sistema in ["OPERANDO", "BLOQUEADO"]:
+        messagebox.showwarning(
+            "Atención", "Detén la banda para poder usar la cámara en modo calibración."
+        )
+        return
+    # Esto abrirá las ventanas de OpenCV del otro archivo
+    calibrador.ejecutar_calibracion(camara_id=2)
+    messagebox.showinfo(
+        "Calibración",
+        "Se han actualizado los rangos de color. Surtirán efecto en el próximo arranque de la banda.",
+    )
+
+
 # --- Interfaz ---
 ventana = tk.Tk()
 ventana.title("Manguito v2")
@@ -207,6 +248,15 @@ lbl_estado.pack(pady=15)
 
 btn_conectar = tk.Button(ventana, text="🔌 Conectar Arduino", command=conectar_arduino)
 btn_conectar.pack(pady=5)
+
+# --- Agregar a la GUI (debajo de btn_conectar) ---
+btn_calibrar = tk.Button(
+    ventana,
+    text="⚙️ Calibrar Cámara (HSV)",
+    bg="#e2e3e5",
+    command=abrir_herramienta_calibracion,
+)
+btn_calibrar.pack(pady=5)
 
 # Controles de Banda
 frame_banda = tk.LabelFrame(ventana, text=" Banda Transportadora ", padx=10, pady=10)
