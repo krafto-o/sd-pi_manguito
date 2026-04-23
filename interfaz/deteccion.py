@@ -37,7 +37,7 @@ def enviar_comando(letra):
 
 def bucle_vision():
     global corriendo_deteccion
-    cap = cv2.VideoCapture(2)
+    cap = cv2.VideoCapture(0)
 
     while corriendo_deteccion:
         ret, frame = cap.read()

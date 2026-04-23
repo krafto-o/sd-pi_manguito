@@ -1,0 +1,18 @@
+{
+    "verde": {
+        "h_min": 22,
+        "s_min": 51,
+        "v_min": 94,
+        "h_max": 80,
+        "s_max": 255,
+        "v_max": 255
+    },
+    "maduro": {
+        "h_min": 15,
+        "s_min": 120,
+        "v_min": 180,
+        "h_max": 30,
+        "s_max": 255,
+        "v_max": 255
+    }
+}

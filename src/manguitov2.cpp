@@ -7,15 +7,13 @@ const int pinMotor = 9;           // PIN para el TIP120
 const int pinServo = 10;          // PIN del servo MG995
 const int pinBotonEmergencia = 2; // Pin de interrupcion fisica
 
-// NUEVOS PINES: Botones Físicos de Control
-const int pinBtnInicio = 3;
-const int pinBtnFreno = 4;
-const int pinBtnMaduro = 5;
-const int pinBtnVerde = 6;
+// NUEVOS PINES: Botones Físicos Unificados (Pulsadores Momentáneos)
+const int pinBtnToggleBanda = 3;
+const int pinBtnToggleFruta = 4;
 
 // --- CONSTANTES DEL SERVO ---
-const int ANGULO_RUTA_A = 0;  // Verde
-const int ANGULO_RUTA_B = 60; // Maduro
+const int ANGULO_RUTA_A = 110; // Verde
+const int ANGULO_RUTA_B = 70;  // Maduro
 int estadoServo = ANGULO_RUTA_A;
 
 // --- ESTADOS DEL SISTEMA ---
@@ -29,12 +27,10 @@ unsigned long tiempoUltimoPaso = 0;
 volatile bool emergenciaActivada = false;
 
 // --- VARIABLES DE DEBOUNCE (ANTIRREBOTE) ---
-bool estadoInicioAnt = HIGH;
-bool estadoFrenoAnt = HIGH;
-bool estadoMaduroAnt = HIGH;
-bool estadoVerdeAnt = HIGH;
+bool estadoToggleBandaAnt = HIGH;
+bool estadoToggleFrutaAnt = HIGH;
 unsigned long tiempoDebounce = 0;
-const int RETARDO_DEBOUNCE = 50; // 50ms para ignorar ruido eléctrico
+const int RETARDO_DEBOUNCE = 200; // 50ms para ignorar ruido eléctrico
 
 // --- RUTINA DE INTERRUPCION ---
 void paroDeEmergencia() {
@@ -49,16 +45,14 @@ void setup() {
   Serial.begin(9600);
   pinMode(pinMotor, OUTPUT);
 
-  // Pin de interrupción
+  // Pin de interrupción (Botón de enclavamiento)
   pinMode(pinBotonEmergencia, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(pinBotonEmergencia), paroDeEmergencia,
                   FALLING);
 
-  // Configuración de botones físicos de control
-  pinMode(pinBtnInicio, INPUT_PULLUP);
-  pinMode(pinBtnFreno, INPUT_PULLUP);
-  pinMode(pinBtnMaduro, INPUT_PULLUP);
-  pinMode(pinBtnVerde, INPUT_PULLUP);
+  // Configuración de los 2 botones de pulso
+  pinMode(pinBtnToggleBanda, INPUT_PULLUP);
+  pinMode(pinBtnToggleFruta, INPUT_PULLUP);
 
   miServo.attach(pinServo);
   miServo.write(ANGULO_RUTA_A);
@@ -74,6 +68,7 @@ void loop() {
     miServo.write(ANGULO_RUTA_A);
     estadoServo = ANGULO_RUTA_A;
 
+    // Limpiar el buffer serial
     while (Serial.available() > 0) {
       Serial.read();
     }
@@ -87,39 +82,42 @@ void loop() {
   if (Serial.available() > 0) {
     comando = Serial.read();
   }
-  // Opción B: Comandos desde Botones Físicos
+  // Opción B: Comandos desde Botones Físicos de Pulso
   else {
-    bool inicioAct = digitalRead(pinBtnInicio);
-    bool frenoAct = digitalRead(pinBtnFreno);
-    bool maduroAct = digitalRead(pinBtnMaduro);
-    bool verdeAct = digitalRead(pinBtnVerde);
+    bool toggleBandaAct = digitalRead(pinBtnToggleBanda);
+    bool toggleFrutaAct = digitalRead(pinBtnToggleFruta);
 
-    // Lógica de detección de "Borde de bajada" (Presión del botón)
+    // Lógica de detección de "Borde de bajada"
     if (millis() - tiempoDebounce > RETARDO_DEBOUNCE) {
-      if (inicioAct == LOW && estadoInicioAnt == HIGH) {
-        comando = 'I';
-        Serial.println("SYNC_I"); // Notifica a Python del cambio
+
+      // BOTÓN 1: INICIO / PARO BANDA
+      if (toggleBandaAct == LOW && estadoToggleBandaAnt == HIGH) {
+        if (estadoActual == ESPERANDO || estadoActual == FRENANDO) {
+          comando = 'I';
+          Serial.println("SYNC_I");
+        } else {
+          comando = 'F';
+          Serial.println("SYNC_F");
+        }
         tiempoDebounce = millis();
-      } else if (frenoAct == LOW && estadoFrenoAnt == HIGH) {
-        comando = 'F';
-        Serial.println("SYNC_F");
-        tiempoDebounce = millis();
-      } else if (maduroAct == LOW && estadoMaduroAnt == HIGH) {
-        comando = 'M';
-        Serial.println("SYNC_M");
-        tiempoDebounce = millis();
-      } else if (verdeAct == LOW && estadoVerdeAnt == HIGH) {
-        comando = 'V';
-        Serial.println("SYNC_V");
+      }
+
+      // BOTÓN 2: CLASIFICACIÓN VERDE / MADURO
+      else if (toggleFrutaAct == LOW && estadoToggleFrutaAnt == HIGH) {
+        if (estadoServo == ANGULO_RUTA_A) {
+          comando = 'M';
+          Serial.println("SYNC_M");
+        } else {
+          comando = 'V';
+          Serial.println("SYNC_V");
+        }
         tiempoDebounce = millis();
       }
     }
 
     // Guardamos el estado actual para la siguiente vuelta
-    estadoInicioAnt = inicioAct;
-    estadoFrenoAnt = frenoAct;
-    estadoMaduroAnt = maduroAct;
-    estadoVerdeAnt = verdeAct;
+    estadoToggleBandaAnt = toggleBandaAct;
+    estadoToggleFrutaAnt = toggleFrutaAct;
   }
 
   // 2. PROCESAMIENTO CENTRAL DE COMANDOS
@@ -131,10 +129,22 @@ void loop() {
       miServo.write(ANGULO_RUTA_A);
       estadoServo = ANGULO_RUTA_A;
       Serial.println("!!! BOTON DE EMERGENCIA PRESIONADO (SOFTWARE) !!!");
-    } else if (estadoActual == ESPERANDO && comando == 'I') {
-      estadoActual = ACELERANDO;
-      Serial.println("Arrancando banda...");
-    } else if (estadoActual == OPERANDO && comando == 'F') {
+    }
+
+    // --- LÓGICA DE ARRANQUE CON CANDADO DE SEGURIDAD ---
+    else if (estadoActual == ESPERANDO && comando == 'I') {
+      // Validamos si el botón físico de emergencia sigue sumido (LOW)
+      if (digitalRead(pinBotonEmergencia) == LOW) {
+        Serial.println("BLOQUEO: Boton de emergencia fisico enclavado. Gire "
+                       "para liberar.");
+      } else {
+        estadoActual = ACELERANDO;
+        Serial.println("Arrancando banda...");
+      }
+    }
+    // ---------------------------------------------------
+
+    else if (estadoActual == OPERANDO && comando == 'F') {
       estadoActual = FRENANDO;
       Serial.println("Frenando banda...");
     } else if (estadoActual == OPERANDO) {

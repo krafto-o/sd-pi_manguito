@@ -9,26 +9,41 @@ import json
 import time
 import calibrador  # Importamos tu nuevo archivo modular
 
-
 # --- CONFIGURACION DE COLORES Y AREA DE OPEN VISION ---
-# Función para extraer los arreglos Numpy desde el JSON
+AREA_MINIMA = 5000
+
+
 def cargar_limites_hsv():
+    """Carga los límites para AMBOS colores. Usa valores por defecto si falla."""
     try:
         with open("config_hsv.json", "r") as f:
             c = json.load(f)
-            return (
-                np.array([c["h_min"], c["s_min"], c["v_min"]]),
-                np.array([c["h_max"], c["s_max"], c["v_max"]]),
-            )
-    # Valores de seguridad si el archivo no existe
+            # Intentamos leer el nuevo formato anidado
+            if "verde" in c and "maduro" in c:
+                vb = np.array(
+                    [c["verde"]["h_min"], c["verde"]["s_min"], c["verde"]["v_min"]]
+                )
+                va = np.array(
+                    [c["verde"]["h_max"], c["verde"]["s_max"], c["verde"]["v_max"]]
+                )
+                mb = np.array(
+                    [c["maduro"]["h_min"], c["maduro"]["s_min"], c["maduro"]["v_min"]]
+                )
+                ma = np.array(
+                    [c["maduro"]["h_max"], c["maduro"]["s_max"], c["maduro"]["v_max"]]
+                )
+                return vb, va, mb, ma
+            else:
+                raise ValueError("El JSON no tiene las claves 'verde' y 'maduro'.")
     except Exception as e:
-        print(f"Error: {e}")
-        return np.array([35, 40, 40]), np.array([85, 255, 255])
+        print(f"Aviso de Configuración: {e}. Usando valores por defecto.")
+        # Valores por defecto (ajustados a tus pruebas previas)
+        vb = np.array([22, 51, 94])  # Verde Bajo
+        va = np.array([80, 255, 255])  # Verde Alto
+        mb = np.array([15, 120, 180])  # Maduro Bajo (Amarillo)
+        ma = np.array([30, 255, 255])  # Maduro Alto (Amarillo)
+        return vb, va, mb, ma
 
-
-VERDE_BAJO = np.array([35, 40, 40])  # TODO: Definir valores para el color verde
-VERDE_ALTO = np.array([85, 255, 255])  # TODO: Definir valores para el color amarillo
-AREA_MINIMA = 5000
 
 # --- ESTADO GLOBAL ---
 arduino = None
@@ -102,19 +117,23 @@ def conectar_arduino():
 
 
 def enviar_comando(letra, nuevo_estado=None):
-    global estado_sistema
+    global estado_sistema, ultimo_comando_vision
+
     if arduino and arduino.is_open:
         arduino.write(letra.encode())
         print(f"> Enviado a Arduino: {letra}")
+
+        if letra in ["M", "V"]:
+            ultimo_comando_vision = letra
+
         if nuevo_estado:
             estado_sistema = nuevo_estado
             actualizar_interfaz()
 
 
-# --- COMUNICACION BIDIRECCIONAL, CONEXION CON ARDUINO ---
+# --- COMUNICACION BIDIRECCIONAL ---
 def escuchar_arduino():
-    """Lee el puerto serial sin bloquear la interfaz de tkinter, se llama a si misma cada 100ms."""
-    global estado_sistema
+    global estado_sistema, ultimo_comando_vision
     if arduino and arduino.is_open and programa_corriendo:
         try:
             if arduino.in_waiting > 0:
@@ -130,10 +149,19 @@ def escuchar_arduino():
                             "Alerta del Hardware:\n\nSe presionó el botón físico de paro. El sistema se ha bloqueado.",
                         )
                         verificar_seguridad()
+                    elif "SYNC_I" in mensaje and estado_sistema == "ESPERANDO":
+                        estado_sistema = "OPERANDO"
+                        actualizar_interfaz()
+                    elif "SYNC_F" in mensaje and estado_sistema == "OPERANDO":
+                        estado_sistema = "ESPERANDO"
+                        actualizar_interfaz()
+                    elif "SYNC_M" in mensaje:
+                        ultimo_comando_vision = "M"
+                    elif "SYNC_V" in mensaje:
+                        ultimo_comando_vision = "V"
         except Exception as e:
             pass  # TODO: Agregar excepcion y manejador de errores
 
-        # Repetimos el ciclo cada 100 milisegundos
         ventana.after(100, escuchar_arduino)
 
 
@@ -143,11 +171,11 @@ def bucle_vision():
 
     while programa_corriendo:
         if estado_sistema == "OPERANDO":
-            # 1. Cargamos la config fresca justo al arrancar la banda
-            VERDE_BAJO, VERDE_ALTO = cargar_limites_hsv()
+            # 1. Cargamos config de AMBOS colores
+            V_BAJO, V_ALTO, M_BAJO, M_ALTO = cargar_limites_hsv()
 
             # 2. Tomamos control de la cámara
-            cap = cv2.VideoCapture(2)
+            cap = cv2.VideoCapture(0)
 
             while estado_sistema == "OPERANDO" and programa_corriendo:
                 ret, frame = cap.read()
@@ -155,36 +183,76 @@ def bucle_vision():
                     continue
 
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                mask = cv2.inRange(hsv, VERDE_BAJO, VERDE_ALTO)
-                mask = cv2.erode(mask, None, iterations=2)
-                mask = cv2.dilate(mask, None, iterations=2)
 
-                contornos, _ = cv2.findContours(
-                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                # --- PROCESAMIENTO MÁSCARA VERDE ---
+                mask_v = cv2.inRange(hsv, V_BAJO, V_ALTO)
+                mask_v = cv2.erode(mask_v, None, iterations=2)
+                mask_v = cv2.dilate(mask_v, None, iterations=2)
+                contornos_v, _ = cv2.findContours(
+                    mask_v, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
                 )
 
-                detectado_verde = False
-                for c in contornos:
-                    if cv2.contourArea(c) > 5000:
+                # --- PROCESAMIENTO MÁSCARA MADURO (Amarillo) ---
+                mask_m = cv2.inRange(hsv, M_BAJO, M_ALTO)
+                mask_m = cv2.erode(mask_m, None, iterations=2)
+                mask_m = cv2.dilate(mask_m, None, iterations=2)
+                contornos_m, _ = cv2.findContours(
+                    mask_m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+
+                comando_detectado = None
+
+                # Evaluar primero si hay mangos verdes
+                for c in contornos_v:
+                    if cv2.contourArea(c) > AREA_MINIMA:
                         x, y, w, h = cv2.boundingRect(c)
                         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                        detectado_verde = True
+                        cv2.putText(
+                            frame,
+                            "VERDE",
+                            (x, y - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            (0, 255, 0),
+                            2,
+                        )
+                        comando_detectado = "V"
                         break
 
-                if detectado_verde:
-                    if ultimo_comando_vision != "V":
-                        enviar_comando("V")
-                        ultimo_comando_vision = "V"
+                # Si no vio verdes, buscar maduros
+                if not comando_detectado:
+                    for c in contornos_m:
+                        if cv2.contourArea(c) > AREA_MINIMA:
+                            x, y, w, h = cv2.boundingRect(c)
+                            cv2.rectangle(
+                                frame, (x, y), (x + w, y + h), (0, 255, 255), 2
+                            )
+                            cv2.putText(
+                                frame,
+                                "MADURO",
+                                (x, y - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.7,
+                                (0, 255, 255),
+                                2,
+                            )
+                            comando_detectado = "M"
+                            break
+
+                # --- LÓGICA DE CONTROL ---
+                if comando_detectado:
+                    # Solo enviamos el comando si es distinto al último que mandamos
+                    if ultimo_comando_vision != comando_detectado:
+                        enviar_comando(comando_detectado)
+                        ultimo_comando_vision = comando_detectado
 
                 cv2.imshow("Monitor de Produccion", frame)
                 cv2.waitKey(1)
 
-            # 3. Al detener la banda, SOLTAMOS la cámara y cerramos la ventana
             cap.release()
             cv2.destroyWindow("Monitor de Produccion")
 
         else:
-            # Si no estamos operando, el hilo duerme un poco para no quemar CPU
             time.sleep(0.2)
 
 
@@ -208,17 +276,13 @@ def verificar_seguridad():
         actualizar_interfaz()
 
 
-# --- CIERRE SEGURO ---
 def cerrar_programa():
-    """Detenemos la maquina por seguridad, apaga la camara y cierra la interfaz."""
     global programa_corriendo
     if messagebox.askokcancel("Salir", "¿Detener todo y cerrar el panel de control?"):
-        programa_corriendo = False  # Rompemos el ciclo del hilo de OpenCV
-
+        programa_corriendo = False
         if arduino and arduino.is_open:
-            arduino.write(b"E")  # Frenado total al cerrar
+            arduino.write(b"E")
             arduino.close()
-
         ventana.destroy()
 
 
@@ -228,17 +292,15 @@ def abrir_herramienta_calibracion():
             "Atención", "Detén la banda para poder usar la cámara en modo calibración."
         )
         return
-    # Esto abrirá las ventanas de OpenCV del otro archivo
-    calibrador.ejecutar_calibracion(camara_id=2)
+    calibrador.ejecutar_calibracion(camara_id=0)
     messagebox.showinfo(
-        "Calibración",
-        "Se han actualizado los rangos de color. Surtirán efecto en el próximo arranque de la banda.",
+        "Calibración", "Surtirán efecto en el próximo arranque de la banda."
     )
 
 
 # --- Interfaz ---
 ventana = tk.Tk()
-ventana.title("Manguito v2")
+ventana.title("Manguito v2 - Dual Mode")
 ventana.geometry("450x550")
 
 ventana.protocol("WM_DELETE_WINDOW", cerrar_programa)
@@ -249,7 +311,6 @@ lbl_estado.pack(pady=15)
 btn_conectar = tk.Button(ventana, text="🔌 Conectar Arduino", command=conectar_arduino)
 btn_conectar.pack(pady=5)
 
-# --- Agregar a la GUI (debajo de btn_conectar) ---
 btn_calibrar = tk.Button(
     ventana,
     text="⚙️ Calibrar Cámara (HSV)",
@@ -258,7 +319,6 @@ btn_calibrar = tk.Button(
 )
 btn_calibrar.pack(pady=5)
 
-# Controles de Banda
 frame_banda = tk.LabelFrame(ventana, text=" Banda Transportadora ", padx=10, pady=10)
 frame_banda.pack(pady=10)
 btn_inicio = tk.Button(
@@ -278,7 +338,6 @@ btn_freno = tk.Button(
 )
 btn_freno.grid(row=0, column=1, padx=5)
 
-# Controles de Servo
 frame_servo = tk.LabelFrame(ventana, text=" Clasificacion Manual 🥭", padx=10, pady=10)
 frame_servo.pack(pady=10)
 btn_maduro = tk.Button(
@@ -298,7 +357,6 @@ btn_verde = tk.Button(
 )
 btn_verde.grid(row=0, column=1, padx=5)
 
-# Emergencia y Salida
 btn_emergencia = tk.Button(
     ventana,
     text="PARADA DE EMERGENCIA",
@@ -319,8 +377,6 @@ btn_salir = tk.Button(
 )
 btn_salir.pack(pady=15)
 
-# Iniciamos el hilo de la camara en segundo plano al iniciar
 threading.Thread(target=bucle_vision, daemon=True).start()
-# TODO:: Agregar manejador de errores por si se ejecuta la interfaz sin la camara conectada
 actualizar_interfaz()
 ventana.mainloop()
