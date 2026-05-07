@@ -64,7 +64,6 @@ void setup() {
 void loop() {
   // 0. GESTIÓN DE EMERGENCIA FÍSICA
   if (emergenciaActivada) {
-    Serial.println("!!! EMERGENCIA FISICA !!! Boton presionado.");
     miServo.write(ANGULO_RUTA_A);
     estadoServo = ANGULO_RUTA_A;
 

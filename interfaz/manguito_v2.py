@@ -175,7 +175,7 @@ def bucle_vision():
             V_BAJO, V_ALTO, M_BAJO, M_ALTO = cargar_limites_hsv()
 
             # 2. Tomamos control de la cámara
-            cap = cv2.VideoCapture(0)
+            cap = cv2.VideoCapture(2)
 
             while estado_sistema == "OPERANDO" and programa_corriendo:
                 ret, frame = cap.read()
@@ -262,6 +262,8 @@ def disparar_emergencia():
         enviar_comando("E")
         estado_sistema = "BLOQUEADO"
         actualizar_interfaz()
+        if arduino and arduino.is_open:
+            arduino.reset_input_buffer()
         messagebox.showerror("EMERGENCIA", "¡Sistema detenido por software!")
         verificar_seguridad()
 
@@ -269,6 +271,8 @@ def disparar_emergencia():
 def verificar_seguridad():
     global estado_sistema
     if messagebox.askyesno("Seguridad", "¿Es seguro restablecer la maquina?"):
+        if arduino and arduino.is_open:
+            arduino.reset_input_buffer()
         estado_sistema = "ESPERANDO"
         actualizar_interfaz()
     else:
@@ -292,7 +296,7 @@ def abrir_herramienta_calibracion():
             "Atención", "Detén la banda para poder usar la cámara en modo calibración."
         )
         return
-    calibrador.ejecutar_calibracion(camara_id=0)
+    calibrador.ejecutar_calibracion(camara_id=2)
     messagebox.showinfo(
         "Calibración", "Surtirán efecto en el próximo arranque de la banda."
     )

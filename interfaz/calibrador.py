@@ -44,7 +44,7 @@ def cargar_configuracion_previa():
     return config_por_defecto
 
 
-def ejecutar_calibracion(camara_id=0):
+def ejecutar_calibracion(camara_id=2):
     config = cargar_configuracion_previa()
     modo_actual = "verde"  # Empezamos calibrando el verde
 
